@@ -1,0 +1,496 @@
+---
+title: "Progetto_NetworkData_AlessandroLoVerde"
+author: "Alessandro Lo Verde"
+date: "09-28-2023"
+output: html_document
+---
+
+
+## Introduction
+
+The following work aims to study a **directional network with binary variables**, where the edges represent the presence or absence of the official listing of the foreign exchange rate of a currency from country B in the foreign exchange rate market of country A.
+
+The presence of a currency in the exchanges of several foreign exchange markets represent a good **proxy for liquidity**, which is the unobserved feature that we want to investigate in this study.
+
+The analysis will proceed with preliminary examinations of network statistics, centrality measures. Following this, we will employ a **Stochastic Block Model (SBM)**. The SBM assumes the presence of a set of discrete latent variables (structural model) that adhere to a specific probability distribution. This model is designed to effectively capture the underlying dependency structure of the observed network variables (measure model). 
+
+The following work is based on the dataset contained in the work of ** Flandreau, M. and C. Jobst (2005), ‘The ties that divide: a network analysis of the international monetary system 1890–1910’, Journal of Economic History, vol. 65(4)** [1] and Flandreau, M. and C. Jobst (2009), ‘The empirics of international currencies: Network Externalities, history and persistence’, The Economic Journal, vol. 119(April)[2].
+
+## 1 -- Lettura File 
+
+The dataset encompasses comprehensive data on the exchange rates of **45 currencies** across **three distinct time periods: 1890, 1900, and 1910**. Additionally, it includes a set of variables that serve as both nodal and relational attributes characterizing the connections between these countries in a network model. These variables offer valuable insights into currency markets, trade relations, and unique country-specific features during the aforementioned years. 
+
+Here's the list of the variables:
+
+**Ordered Country Pairs Variables (Different for i, j and j, i):**
+
+1. **`quote1890`**: An indicator variable, equal to 1 if there is an active market for the currency of country_B in country_A in 1890, and 0 otherwise.
+2. **`quote1900`**: An indicator variable, equal to 1 if there is an active market for the currency of country_B in country_A in 1900, and 0 otherwise.
+3. **`quote1910`**: An indicator variable, equal to 1 if there is an active market for the currency of country_B in country_A in 1910, and 0 otherwise.
+4. `colony`: An indicator variable, equal to 1 if country_A is a colony of country_B, and 0 otherwise.
+
+A currency is considered to be traded in a given foreign country if there is evidence of active trading in at least one financial centre within the foreign country; Active trading means that transactions take place regularly. If a currency is listed in a stock exchange bulletin but there are never prices quoted or quoted prices do not change, the link is coded as 0.
+
+**Unordered Country Pairs Variables (i, j is the same as j, i):**
+
+5. `dist`: The log distance (as the crow flies) between the cities with foreign exchange markets in country_A and country_B.
+6. `bitrade`: Total trade between country_A and country_B in thousand US dollars. Adjustments have been made to ensure conformity between currency areas and territories reporting trade.
+
+**Individual Country Characteristics (Duplicated for A and B where appropriate):**
+
+7. `gold`: An indicator variable, equal to 1 if the country has a currency convertible in gold in 1900, and 0 otherwise.
+8. `debtburden`: The ratio of government debt over government revenues in 1900.
+9. `rlong`: The secondary market yield for gold-denominated government debt in 1900.
+10. `rshort1900`: The market rate for 3-month lending or the discount rate for 3-month commercial paper in 1900.
+11. `rshort1890`: Similar to `rshort1900`, but for 1890.
+12. `rgdp`: The log of real GDP in 1900.
+13. `rgdpcap`: The log of real GDP per capita in 1900.
+14. `poldemo`: An index of democracy (ID) for 1900, based on the Polyarchy dataset.
+15. `coverage`: The logarithm of the number of currencies traded in the country_A's foreign exchange market. Used to control for differences in market coverage among national sources.
+
+
+```{r Libraries, message=FALSE,echo=TRUE}
+library(data.table)
+library(igraph)
+library(sbm)
+library(ggplot2)
+```
+
+```{r Lettura File, echo=TRUE}
+
+# Set the working directory and read the file
+path <- "/Users/alessandroloverde/Desktop/Github/R-Stochastic-Block-Model-Currencies-1890-1900-1910-Flandreau/flandreau_jobst_internationalcurrencies_data.txt"
+
+# Function to read the data from the file
+reading_function <- function(path) {
+  variables <- list()  # Create a list to store variables
+  
+  # Read the file
+  lines <- readLines(path)
+  
+  # Extract the header
+  header <- unlist(strsplit(trimws(lines[1]), "\t")) 
+  #trimws removes any leading or trailing whitespace using the trimws function.
+  # The strsplit function is then used to split the resulting cleaned first line of text into substrings based on the tab character "\t"
+  # the unlist function converts the list of substrings obtained from splitting the first line of text into a single character vector. 
+ 
+  # Initialize an empty list for each variable in the header
+  for (i in header) {
+    variables[[i]] <- vector("list")
+  }
+
+  # Start from the second row
+  for (row in lines[-1]) {
+    data <- unlist(strsplit(trimws(row), "\t"))
+    for (j in 1:length(header)) {
+      variables[[header[j]]] <- append(variables[[header[j]]], data[j])
+    }
+  }
+
+  return(variables)
+}
+
+# Read data from the file into a list
+data_list <- reading_function(path)
+
+# Combine the lists into a dataframe
+curr <- data.frame(lapply(data_list, unlist), stringsAsFactors = FALSE)
+
+# Remove the quotation marks around the currency names in the country_A column
+curr$country_A <- gsub("\"", "", curr$country_A)
+
+# Remove the quotation marks around the currency names in the country_B column
+curr$country_B <- gsub("\"", "", curr$country_B)
+
+# Columns to operate on
+columns_to_process <- 3:25  # Replace with desired column numbers
+
+# Loop to replace missing values with 0 for each specified column
+for (column in columns_to_process) {
+
+  # Convert the column to numeric if it's not already
+  curr[, column] <- as.numeric(curr[, column])
+  
+  # Replace missing values with 0 in the specified column
+  curr[, column] <- replace(curr[, column], is.na(curr[, column]), 0)
+}
+
+# Display the first few rows of the dataframe
+head(curr[1:5,1:5])
+
+
+```
+
+## 2 -- Directed graph for 1890, 1900, 1910
+
+In this paragraph, we **filter the dataset according to three variables, namely quote1890, quote1900, and quote1910, to create three subsets** (edges). 
+These subsets contain all the directed relationships between country_A and country_B over the years taken into consideration; only in case there is a connection, indicated by a 1 in the variable quote, that one pair of countries are comprehended in the subset.
+
+With the function graph_from_data_frame we represent our binary graph in which we have 45 nodes and a variable number of edges that represent the existence or absence of the exchange rate quote of country_B in the book listings of foreign exchange market of country_A.
+
+At the end of this paragraph we get:
+ 
+- edges: the **3 subsets** obtained from the filtering for each year (1890, 1900, 1910).
+- graphs: **3 objects of the package** igraph containing all the relevant information (vertices, edges, edges attributes and nodal attributes) of the graphs for each year.
+- **3 adjacency matrices** corresponding to each of the 3 periods.
+
+```{r transform to graph, echo=TRUE}
+# Function to create edges, graph, and adjacency matrix from data frame
+create_graph_and_adjacency_matrix <- function(data, year_col_name) {
+  # List of Currencies
+  valute <- unique(data$country_A)
+  
+  unique_data <- data[!duplicated(data$country_A), ]
+  
+  # Filter the dataset based on the year column
+  edges <- data[data[, year_col_name] == 1, ]
+  
+  # Create a directed graph with the specified columns as attributes
+  graph <- graph_from_data_frame(
+    d = edges[, c("country_A", "country_B")],
+    directed = TRUE,
+    vertices = valute
+  )
+  
+  # Add all other attributes from the columns to the graph
+for (col_name in colnames(data)) {
+  if (col_name %in% c("colony","dist", "bitrade")) {
+    graph <- set_edge_attr(graph, col_name, value = edges[, col_name])
+  }
+}
+  
+for (col_name in colnames(data)) {
+  if (col_name %in% c("colony","dist", "bitrade")) {} else 
+    {graph <- set_vertex_attr(graph,col_name, index = V(graph),  value = unique_data[,col_name])
+  }
+}  
+  # Calculate the adjacency matrix
+  adjacency_matrix <- get.adjacency(graph, sparse = FALSE)
+  
+  # Return edges, graph, and adjacency matrix
+  return(list(edges = edges, graph = graph, adjacency_matrix = adjacency_matrix))
+}
+
+# Usage for 1890
+result_1890 <- create_graph_and_adjacency_matrix(curr, "quote1890")
+edges_1890 <- result_1890$edges
+graph_1890 <- result_1890$graph
+adj_matrix_1890 <- result_1890$adjacency_matrix
+#plotMyMatrix(adj_matrix_1890, dimLabels = list(row = paste0('curr', year), col = paste0('curr', year)))
+#adj_matrix_1890
+
+# Usage for 1900
+result_1900 <- create_graph_and_adjacency_matrix(curr, "quote1900")
+edges_1900 <- result_1900$edges
+graph_1900 <- result_1900$graph
+adj_matrix_1900 <- result_1900$adjacency_matrix
+#plotMyMatrix(adj_matrix_1890, dimLabels = list(row = paste0('curr', year), col = paste0('curr', year)))
+#adj_matrix_1900
+
+# Usage for 1910
+result_1910 <- create_graph_and_adjacency_matrix(curr, "quote1910")
+edges_1910 <- result_1910$edges
+graph_1910 <- result_1910$graph
+adj_matrix_1910 <- result_1910$adjacency_matrix
+
+#plotMyMatrix(adj_matrix_1910, dimLabels = list(row = paste0('curr', year), col = paste0('curr', year)))
+#adj_matrix_1910[20:40,]
+
+```
+
+
+## 3.1 -- Preliminary analysis: Network statistics Analysis
+
+In this paragraph it is implemented the following function, `network_statistics_analysis`, designed to gain insights into the structure of the network, as well as patterns of relationships between entities in the specified 3 time periods.
+
+In particular, we have:
+
+- **Vertex_Count**: This statistic calculates the number of vertices in the given graph. We have **45 nodes** corresponding to each country contained in the dataset for all the 3 periods 1890, 1900, 1910.
+
+- **Edge_Count**: This statistic computes the number of directed edges (connections) between vertices in the graph, representing the listing of country_A of the currency of country_B. As we can expect, the number of connections between countries belonging to the network grows during the 3 periods, since **we start from a total of 194 edges and we end to 264 edges**. In fact, we can observe that the **Network_Density** (a measure of how connected a graph is) increases over time, even if it is clear that we have a sparse network (density around 10%).
+
+-  Over the course of the three periods studied, it becomes evident that the occurrence of **Mutual Dyads**, representing pairs of entities with bidirectional relationships, steadily increases, albeit consistently remaining fewer than the **Asymmetric Dyads**, which denote one-way relationships within the network. In fact, the metric of **Reciprocity**, reflecting the prevalence of reciprocated relationships, indicates a growing trend towards mutual connections, rising **from 40% to 47%** over time. This suggests anyway a greater tendency, ceteris paribus, toward reciprocal links than the one a random drawing should have[1].
+Notably, at both the end of the nineteenth century and on the brink of the First World War, the network exhibits a significant absence of connections. The majority of potential relationships are unestablished, as evidenced by the predominance of **Null Dyads**, signifying pairs of entities with no direct relationships or connections within the network.
+
+- **Transitivity**: Transitivity measures the propensity of vertices in the network to establish triangles or clusters of interconnected entities. Similar to reciprocity, transitivity tends to increase over time, rising **from 30% to 38%**. Indeed, this upward trend in the triangular relations, implies that global interconnections continue to increase over time, and probably, that countries that do have an interest in exchange currencies directly, but are only indrectly connected, tend to establish direct links with time, leading to official listings between them.
+
+```{r statistics Analysis, message = FALSE, echo=TRUE}
+
+set.seed(1)
+
+network_statistics_analysis <- function(graph, year) {
+  # Create a data frame to store the results
+  results <- data.frame(
+    Year = year,
+    Vertex_Count = vcount(graph),
+    Edge_Count = ecount(graph),
+    Network_Density = graph.density(graph),
+    Mutual_Dyads = dyad.census(graph)$mut,
+    Asymmetric_Dyads = dyad.census(graph)$asym,
+    Null_Dyads = dyad.census(graph)$null,
+    Reciprocity = reciprocity(graph),
+    Transitivity = transitivity(graph)
+  )
+  
+  return(results)
+}
+
+# Perform network statistics analysis for each year
+statistics_1890 <- network_statistics_analysis(graph_1890, "1890")
+statistics_1900 <- network_statistics_analysis(graph_1900, "1900")
+statistics_1910 <- network_statistics_analysis(graph_1910, "1910")
+
+# Combine the data frames into a single summary dataframe
+statistics <- rbind(statistics_1890, statistics_1900, statistics_1910)
+
+statistics
+
+#assortativity(graph_1890,V(graph_1890)$gold)
+```
+## 3.2 -- Preliminary analysis: Centrality Analysis
+
+**Input Degree Centrality**:
+
+- Input degree centrality measures the number of incoming connections or links that a node receives from other nodes in the network.
+
+- It's important to underscore that input degree centrality holds the utmost significance in this framework. **A nation's "popularity" serves as a proxy for the liquidity** and importance of its currency in the global context. 
+Notably, **three key nations, namely GBR, FRA, and GER**, stand out in this regard. Additionally, there exists a **second group of European nations**, forming somewhat of a middle class, including Italy, Belgium, Sweden, and others. 
+Finally, we get a **third group of countries that are quoted almost nowhere**, in particular American and Pacific Asian nations but also Canada and part of Europe.
+
+**Closeness Centrality and Average Distance**:
+
+- While closeness centrality could be an additional metric, its utility is somewhat limited in this context. Quantifying how quickly a single node can be reached by others (lenght of the paths) may not be as pertinent, as **some nodes with few connections can still exhibit high closeness but may not be particularly influential**. 
+
+- Instead **average distance** (average number of nodes traversed by the shortest path relative to all nodes connected in the network) between nodes tell us something about the network structure: it is on average around 2 in these periods, eyelighting the fact that on average it takes around two stops to go from one currency/financial center to another one. 
+This points toward a **hierarchical system** as pointed out by Flandreau in [1], since there will be a large group of less economically developed countries and a second group of "middle class" countries that potentially rely on one of the **core countries (FRA, GER, GBR) as an intermediary** to facilitate currency exchanges with nations of the middle class block. The direct exchange between those countries was still not highly demanded by the market during that time and consequently, official listings for such exchanges were often not quoted, reflecting the limited interest and demand for these currency pairs.
+
+**Betweenness Centrality**:
+
+- Betweenness centrality identifies nodes that act as critical intermediaries by quantifying how often a node lies on the shortest paths between pairs of other nodes.
+**Betweenness centrality confirms the key role of the 3 core countries**, but, particularly in 1910, provides deeper insights into emerging dynamics during this period. 
+Indeed, the **United States and Hong Kong serve as pivotal hubs**, connecting North-Western countries with Latin America, east-asia and south pacific countries. Their notably high betweenness centrality values indicate their pivotal roles in facilitating currency exchanges and conversions.
+In particular, when examining the table of countries sorted by betweenness centrality, a distinct cluster emerges in 1900 and 1910, consisting of these 5 Eastern countries such as HKG, SGP, CHN, IND, and JPN. Subsequent analysis will shed light on the tendency of these nations to establish reciprocal relationships, which explains the observed phenomenon of frequently occupying intermediary positions along their own paths (high betweenness); so, when considered collectively, these nations will form a distinctive fourth block of countries within the SBM Model. 
+
+The width of the edges in the network's graphical representation is determined by the "bitrade" attribute, highlighting the concentration of strong trade connections during that particular period. Additionally, the size of the network nodes (vertices) is scaled proportionally to the specific centrality measure being analyzed.
+
+ 
+```{r Centrality, message = FALSE, echo=TRUE}
+
+# Function to perform centrality analysis and create subplots
+centrality_analysis <- function(graph, year) {
+  set.seed(5)
+  # In-Degree centrality
+  ideg <- degree(graph, mode = "in", normalized = TRUE)
+
+  # Average distance
+  dist <- mean_distance(graph, directed = TRUE)
+  #dist[is.nan(dist)] = 0
+  
+  # Betweenness centrality
+  bet <- betweenness(graph, normalized = TRUE)
+
+  # Betweenness centrality
+  dist <- mean_distance(graph, directed = TRUE)
+  #dist[is.nan(dist)] = 0
+  
+  # Create data frames for centrality measures
+  ideg_df <- data.frame(Family = V(graph)$name, In_Degree = ideg)
+  bet_df <- data.frame(Family = V(graph)$name, Betweenness = bet)
+  
+  # Sort data frames by centrality measures in descending order
+  ideg_df <- ideg_df[order(ideg_df$In_Degree, decreasing = TRUE), ]
+  bet_df <- bet_df[order(bet_df$Betweenness, decreasing = TRUE), ]
+  
+  # Imposta il layout per enfatizzare i triangoli chiusi
+layout <- layout_with_kk(graph)
+
+  # Create plots for the in-degree centrality
+
+  plot(graph, vertex.size = ideg * 25, main = paste("In-Degree (", year, ")", sep = ""),  vertex.label.cex = 0.6, edge.color = "black", edge.curved = 0.3, edge.width = E(graph)$bitrade / 1000000, edge.arrow.size = 0.1,layout=layout,vertex.label.dist = 0)
+  barplot(ideg_df$In_Degree, names.arg = ideg_df$Family, main = paste("In-Degree (", year, ")", sep = ""), las = 2, cex.names = 0.7, ylim = c(0, 1)) 
+
+  # Create plots for the Betweenness centrality
+
+  plot(graph, vertex.size = bet * 250, main = paste("Betweenness (", year, ")", sep = ""), vertex.label.cex = 0.6, edge.color =  "black", edge.curved = 0.3, edge.width = E(graph)$bitrade / 1000000, edge.arrow.size = 0.1,layout=layout, vertex.label.dist = 0)
+  barplot(bet_df$Betweenness, names.arg = bet_df$Family, main = paste("Betweenness (", year, ")", sep = ""), las = 2, cex.names = 0.7, ylim = c(0, 0.16))
+  
+  # Reset graphical layout
+  par(mfrow = c(1, 1))
+   
+  # Return centrality measures
+  return(data.frame(
+    Year = year,
+    Family = V(graph)$name,
+    In_Degree = ideg,
+    Average_distance = dist,
+    Betweenness = bet
+  ))
+}
+
+# Perform centrality analysis and create subplots for each year
+centrality_1890 <- centrality_analysis(graph_1890, "1890")
+centrality_1900 <- centrality_analysis(graph_1900, "1900")
+centrality_1910 <- centrality_analysis(graph_1910, "1910")
+
+# Create a data frame to store the means
+means_table <- data.frame(
+  Year = c("1890", "1900", "1910"),
+  Mean_Average_Distance = c(centrality_1890$Average_distance[1], centrality_1900$Average_distance[1], centrality_1910$Average_distance[1]))
+
+# Print the table
+print(means_table)
+
+```
+
+
+## 4 -- Model SBM
+
+Here we perform a sbm analysis and then we create a summary table that shows the currencies associated with each "block" identified by SBM analysis for three different years (1890, 1900, and 1910).
+
+We look for similar relational structures between nodes. We assume that there is a latent space of discrete variables (blocks) which fully capture this relational structure we are looking for; if we know that two nodes belong to the same block, they will have the same probability to quote a certain currency k, even if they may end up with different realized links with currency k. Since we don't know the exact number of these Q blocks and the a priori probability of a node to belong to a certain block (alpha), we need to put the analysis into a stochastic framework, by assuming that directed arcs across countries belonging to two blocks respectively, are bernoulli random variables with parameter alpha and that the adjacency matrix that we observe is a single realization of these random variables.
+
+In this framework, we can think to the **latent variables**, which are the blocks of our "model structure", as associated to **different levels of liquidity** and popularity of the currencies among countries; as observed by the authors of [1] in the course of exchange of the "Jornal do Comercio", usually, when an official listing was available for currency B (ex. France, Italy) in country A (Portugal), we can observe lower levels of bid/ask spread for the trade. Unofficial listings were sometimes (not always) also available, but they were associated with higher bid/ask spreads due to the smaller foreign exchange rate market associated.
+These spreads are commonly used today to gauge the liquidity of a foreign currency in a country; unfortunately, during that period, official listings of bid/ask spreads were not as readily available. 
+So, the model employed an observed binary variable as a proxy for liquidity: the presence or absence of an official exchange rate listing in a foreign country (quote 1 / non quote 0).
+**The more a currency was officially listed in different foreign exchange books, the more its spreads were low in those countries and their currencies more liquid** and more attractive for global investments, trades or reserves of cash; probably those countries played a pivotal role in the international economic landscape during that period.
+
+The primary objective is to determine the optimal number of Q blocks across the three periods. The evaluation of the model involves utilizing the **ICL scoring function** to assess various configurations of the number of Q blocks.
+Posterior probabilities (tau) of assignment to a specific block are estimated for each node, and memberships to a particular block are assigned based on the highest approximated posterior probability associated with the node.
+
+The following blocks were identified during the analysis conducted: 
+
+- Throughout all three years, there is a consistent **first block** comprising 6.8 percent of nations (**GBR, FRA, GER**). 
+These nations are notable for having a high probability of their exchange rates being listed in the exchanges of all other blocks. 
+However, it's important to note that these nations have a relatively low probability of listing other nations in the second block and an almost negligible probability of listing nations in the third and, possibly, the fourth block.
+These nations, as highlighted in Flandreau's paper [1], are referred to as "Key" or "Core" Nations, due to their significant economic prominence on the global stage, especially stemming from colonialist policies in the 1800s. 
+Their dominance is characterized by the fact that their currency had a market in almost every country with exchanges at the time, indicating a high demand for these currencies and associated liquidity.
+
+- During all three observation periods, there is a consistent **second block** consisting of approximately the 25 percent of the nations (including **AUH, BEL, CHE, DNK, ESP, ITA, NLD, NOR, PRT, RUS, SWE, USA**). 
+This block is characterized by having a high probability of having their exchange rate listed in the exchanges of the first block.
+Nations of this block have a good probability of being listed by nodes within the second block itself.
+In the early period, these nations have a low probability of being listed by the third and fourth blocks, suggesting limited liquidity in those clusters. However, over time, there is a slight increase in the probability of these nations being listed by the third and possibly the fourth blocks. This signifies that the currencies of these countries gained importance and recognition on the global stage as time progressed.
+
+- In the first period (1890), the **third block** represents emerging market nations with currencies that had limited liquidity in foreign markets during the pre-World War I period. These nations represent most of the nodes 66% of the nations in the network (**ARG, AUS, BRA, CAN, CEY, CHL, CHN, COL, CUB, ECU, EGY, FIN, GRC, HKG, ICH, IND, JAV, JPN, MEX, NZL, OTT, PER, PHL, PRS, ROM, SER, SGP, SIA, URY, VEN**). 
+The fact that these currencies had minimal to no probability of being officially listed in the north-western countries of the first and second block highlights the absence of a substantial market for such currencies and a lack of interest in holding reserves of third-world currencies in these regions.
+These currencies are characterized by a high probability of listing the 3 key nations, a low probability of listing the currencies in the second block, and a very low probability of mutual listing.
+
+- In 1900 and 1910, this **three-block structure** transforms into a **four-block structure** according to the SBM model. 
+A **new third block** emerges, primarily formed by a specific cluster of Asian nations (**CHN, HKG, IND, JPN, SGP**). This new configuration exhibits characteristics similar to the old third block: limited likelihood of being listed by countries in the first and second block, and a high probability of listing them.
+In turn they have a high probability of mutual listing within the block and a slight probability of being listed by the new fourth block. 
+The **fourth block** (**ARG, AUS, BRA, CAN, CEY, CHL, COL, CUB, ECU, EGY, FIN, GRC, ICH, JAV, MEX, NZL, OTT, PER, PHL, PRS, ROM, SER, SIA, URY, VEN**) appears only in the periods 1900, 1910 and has the same characteristics as the old third block, i.e., it has little probability of being listed by all countries, except for the new third block where it seems to have a slightly higher probability of being listed. It has a decreasing probability of listing first (high), second (low), third (low), and fourth blocks (very low), respectively.
+
+```{r Model SBM, message = TRUE, echo=TRUE}
+perform_sbm_analysis <- function(adj_matrix, year, currency_names) {
+
+  # Estimate SBM
+ sbm <- estimateSimpleSBM(netMat = adj_matrix, model = "bernoulli", directed = !isSymmetric(adj_matrix), dimLabels = paste0('curr', year), estimOptions = list(verbosity = 1, plot=FALSE))
+ 
+ # Print models' ICL
+  print(sbm$storedModels)
+
+  # Print selected number of blocks
+  cat("Selected number of blocks:", sbm$nbBlocks, "\n")
+
+  # Print block probabilities (alpha estimates)
+  cat("Prior Block probabilities/proportions (alpha estimates):\n", sbm$blockProp, "\n")
+
+  # Get connectivity parameters as a matrix (pi)
+  connectivity_params <- round(sbm$connectParam$mean, 3)
+  cat("Connectivity parameters (pi estimates):\n")
+  print(connectivity_params)
+
+  # Plot data
+  #plot(sbm, type = "data")
+
+  # Plot expected connection probabilities
+  print(plot(sbm, type = "expected"))
+
+  # Plot mesoscale
+  plot(sbm, type = "meso", plotOptions = list(edge.threshold = 0.05, edge.color = "black", vertex.label.dist = 8, vertex.label.cex = 1.5,edge.curved = 1, seed = 1))
+
+  # Print posterior block probabilities (tau):
+  #cat("Posterior block probabilities (tau):\n")   
+  #    print(sbm$probMemberships)
+
+  # Print memberships (z_i)
+  #cat(":\n", sbm$memberships, "\n")
+
+  #Print membership proportions (approximations of alpha posterior)
+  cat("Membership proportions SBM (approximations of alpha posterior):\n", table(sbm$memberships)/45, "\n")
+  
+  # Divide currencies into blocks
+  currency_blocks <- data.frame(Currency = currency_names, Block = sbm$memberships)
+
+  # Return SBM object and currency_blocks
+  return(list(sbm = sbm, currency_blocks = currency_blocks))
+}
+
+# Example usage with the year 1890
+sbm_1890 <- perform_sbm_analysis(adj_matrix_1890, 1890, V(graph_1890)$name)
+
+# Example usage with the year 1900
+sbm_1900 <- perform_sbm_analysis(adj_matrix_1900, 1900, V(graph_1900)$name)
+
+# Example usage with the year 1910
+sbm_1910 <- perform_sbm_analysis(adj_matrix_1910, 1910, V(graph_1910)$name)
+
+# Access the currency blocks:
+# sbm_1890$currency_blocks
+# sbm_1900$currency_blocks
+# sbm_1910$currency_blocks
+
+
+# Create a list of data frames for each year
+blocks_per_year <- list(sbm_1890$currency_blocks, sbm_1900$currency_blocks, sbm_1910$currency_blocks)
+
+# List of unique blocks (assuming you have this list)
+q_blocks <- c(1,2,3,4)
+
+# Initialize a matrix to store the summary table
+nations_per_block <- matrix("", nrow = length(q_blocks), ncol = length(blocks_per_year))
+rownames(nations_per_block) <- q_blocks
+colnames(nations_per_block) <- c(1890, 1900, 1910)
+
+# Fill in the summary table with concatenated nations
+for (i in 1:length(blocks_per_year)) {
+  df <- blocks_per_year[[i]]
+  year <- 1890 + i*10 - 10 
+  
+  for (block in q_blocks) {
+    nation_at_block <- df$Currency[df$Block == block]
+    nations_per_block[as.character(block), as.character(year)] <- paste(nation_at_block, collapse = ", ")
+  }
+}
+#nations_per_block <- as.data.frame(nations_per_block)
+# Print the summary table
+nations_per_block
+
+
+```
+
+
+## 5 -- Conclusions
+
+As observed by Flandreau [1], **the world at the end of the nineteenth century and the beginning of the twentieth century couldn't be easily divided into "core" and "peripheral" countries**, as some earlier heuristic-based studies had suggested.
+The use of SBM provided a precise analytical tool for examining this type of data, enabling to draw different and more accurate conclusions about the clustering of nations.
+The world in these periods was more accurately characterized as a **"three-block world"**. 
+In this configuration, a significant portion of countries fell into the new middle-class category, distinguished by decent liquidity of their currencies and a related prominence in the global stage.
+
+In comparison to Flandreau's work, where the primary results consistently pointed towards a three-block world throughout the entire period, our application using **SBM with ICL as scoring function, points toward three blocks in 1890, but prefers four blocks in 1900 and 1910**. So, **a new third block emerged in 1900 and 1910**, bearing a striking resemblance to the old third block, which, during those years, becomes the fourth block. This new third block is characterized by strong reciprocal listing between countries within the same block and a complete disinterest in the listing of countries outside of the first block (France, Germany, UK). Part of this new block **composed by Hong Kong, China, India, Japan and Singapore** emerged also as part of 3 countries cliques identified in Flandreau's work after 1900 (group of countries that do quoted and are quoted by every member of the same group) but were not identified by its estimation of the SBM model. Flandreau also acknowledges that in 1910, unlike other peripheral countries that primarily oriented themselves towards the northern Western countries, they displayed a strong tendency to quote one another.
+
+The reason of this different choice made through the SBM is that **the authors take into account two different scoring functions to optimize the number of blocks**, trying to balance the trade off between: 
+
+- detail (always improved by increasing the number of blocks) of the blocks identified
+
+- relevance of the blocks identified. 
+
+The authors eyelight that the **biggest gain in terms of detail was always obtained by going from two to three groups**; The combination of this observation, along with the findings from various block models, justified their selection of the most **parsimonious optimal model** (a three-block structure for the latent model). However, as we said earlier, they acknowledge that in 1910, a four-block structure could reasonably be considered as a possibility.
+
+**Considerations for the monetary policies of those countries**: The authors' conclusion is that "key" and "intermediate" countries, in order to adjust their balance of trades, could  leverage on the strength and liquidity of their currencies to acquire debts denominated in their own currencies when needed; on the other hand, peripheral countries relied more on exchange rate fluctuations to achieve trade balance. For these latter countries, having a relatively weaker currency made their goods cheaper to export in the market, encouraging trade with major and intermediate countries. However, their frequent fluctuations and currency instability made it challenging to borrow money abroad.
+
+
+## Bibliography
+
+[1] Flandreau, M. and C. Jobst (2005), ‘The ties that divide: a network analysis of the international monetary system 1890–1910’, Journal of Economic History, vol. 65(4)[1] 
+
+[2] Flandreau, M. and C. Jobst (2009), ‘The empirics of international currencies: Network Externalities, history and persistence’, The Economic Journal, vol. 119(April)[2].
